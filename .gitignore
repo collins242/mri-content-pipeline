@@ -1,8 +1,9 @@
+.DS_Store
 .env
 .venv/
 __pycache__/
 *.pyc
-*.egg-info/
 dist/
 build/
-data/
+db/*.db*
+wp-plugin/build/
