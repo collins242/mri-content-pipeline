@@ -428,7 +428,7 @@ class MRI_Content_Sync {
 
     $postarr = [
       'ID'           => $post_id ? intval($post_id) : 0,
-      'post_type'    => $p['post_type'] ?? 'post',
+      'post_type'    => $p['post_type'] ?? 'resources',
       'post_status'  => $status,
       'post_title'   => $title,
       'post_name'    => sanitize_title($slug),
@@ -437,7 +437,47 @@ class MRI_Content_Sync {
     ];
 
     $new_id = $post_id ? wp_update_post($postarr, true) : wp_insert_post($postarr, true);
-    if (is_wp_error($new_id)) return $new_id;
+// Post already inserted/updated above and stored in $new_id
+if (is_wp_error($new_id)) return $new_id;
+
+
+if (function_exists('update_field')) {
+
+  // 1) Flexible content block (Basic Content) populated from $content
+  if (!empty($content)) {
+    $block = [
+      'acf_fc_layout' => 'basic_content',
+      'heading'       => $p['h1'] ?? $title,
+      'content'       => $content,
+    ];
+
+    // Optional CTA -> buttons repeater
+    if (!empty($p['cta_text']) && !empty($p['cta_url'])) {
+      $block['buttons'] = [[
+        'url'           => $p['cta_url'],
+        'text'          => $p['cta_text'],
+        'button_color'  => 'btn--primary',
+        'button_target' => 0,
+      ]];
+    }
+
+    update_field('flexible_content_blocks', [ $block ], $new_id);
+  }
+
+  // 2) Schema JSON-LD text area
+  if (!empty($p['schema_jsonld_snippet'])) {
+    update_field('schema_jsonld_snippet', $p['schema_jsonld_snippet'], $new_id);
+  }
+
+  // 3) Relationship field (expects array of Post IDs)
+  if (!empty($p['dynamic_resource_select'])) {
+    $ids = is_array($p['dynamic_resource_select'])
+      ? array_map('intval', $p['dynamic_resource_select'])
+      : array_map('intval', array_filter(array_map('trim', explode(';', (string)$p['dynamic_resource_select']))));
+
+    update_field('dynamic_resource_select', $ids, $new_id);
+  }
+}
 
     if (!empty($p['categories'])) {
       $cats = is_array($p['categories']) ? $p['categories'] : array_map('trim', explode(',', $p['categories']));
