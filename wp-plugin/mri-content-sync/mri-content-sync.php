@@ -178,7 +178,7 @@ class MRI_Content_Sync {
     echo '</td></tr>';
 
     echo '<tr><th scope="row">Post Type</th><td>';
-    echo '<input type="text" name="import_post_type" value="post" class="regular-text" />';
+    echo '<input type="text" name="import_post_type" value="resources" class="regular-text" />';
     echo '<p class="description">Use <code>post</code> unless your environment stores Resources as a custom post type.</p>';
     echo '</td></tr>';
 
