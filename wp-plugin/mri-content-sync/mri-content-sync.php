@@ -11,13 +11,11 @@ class MRI_Content_Sync {
   const ROUTE_NS = 'mri-content/v1';
 
   // Admin menu slugs
-  const ADMIN_MENU_SLUG = 'mri-content-sync';
+  const ADMIN_MENU_SLUG   = 'mri-content-sync';
   const ADMIN_IMPORT_SLUG = 'mri-content-sync-import';
 
   public static function init() {
     add_action('rest_api_init', [__CLASS__, 'register_routes']);
-
-    // Admin UI (Option A)
     add_action('admin_menu', [__CLASS__, 'register_admin_pages']);
   }
 
@@ -50,21 +48,21 @@ class MRI_Content_Sync {
    * Headers required:
    *  - X-MRI-Timestamp: unix epoch seconds
    *  - X-MRI-Signature: hex(hmac_sha256(secret, timestamp + "." + raw_body))
-   * Secret should be defined in wp-config.php:
+   * Secret in wp-config.php:
    *  define('MRI_CONTENT_SYNC_SECRET', '...');
    */
   public static function verify_request(\WP_REST_Request $req) {
     $secret = defined('MRI_CONTENT_SYNC_SECRET') ? MRI_CONTENT_SYNC_SECRET : null;
     if (!$secret) return false;
 
-    $ts = $req->get_header('x-mri-timestamp');
+    $ts  = $req->get_header('x-mri-timestamp');
     $sig = $req->get_header('x-mri-signature');
     if (!$ts || !$sig) return false;
 
     if (abs(time() - intval($ts)) > 300) return false;
 
-    $raw = $req->get_body();
-    $msg = $ts . "." . $raw;
+    $raw  = $req->get_body();
+    $msg  = $ts . "." . $raw;
     $calc = hash_hmac('sha256', $msg, $secret);
 
     return hash_equals($calc, $sig);
@@ -117,7 +115,7 @@ class MRI_Content_Sync {
   }
 
   /* ──────────────────────────────────────────────────────────────────────────
-   * ADMIN UI (Option A): MRI Content Sync → Import Batch
+   * ADMIN UI: MRI Content Sync → Import Batch
    * ────────────────────────────────────────────────────────────────────────── */
 
   public static function register_admin_pages() {
@@ -146,7 +144,7 @@ class MRI_Content_Sync {
 
     echo '<div class="wrap">';
     echo '<h1>MRI Content Sync</h1>';
-    echo '<p>Use <b>Import Batch</b> to upload a CSV and create/update posts, including Yoast fields and ACF fields.</p>';
+    echo '<p>Use <b>Import Batch</b> to upload a CSV and create/update posts (Yoast + ACF + sticky jump nav).</p>';
     echo '</div>';
   }
 
@@ -155,7 +153,6 @@ class MRI_Content_Sync {
 
     echo '<div class="wrap">';
     echo '<h1>Import Batch (CSV)</h1>';
-    echo '<p>Upload a CSV. Recommended: import as <b>Draft</b>, then review and publish.</p>';
 
     if (!empty($_POST['mri_import_submit'])) {
       check_admin_referer('mri_import_csv');
@@ -179,7 +176,7 @@ class MRI_Content_Sync {
 
     echo '<tr><th scope="row">Post Type</th><td>';
     echo '<input type="text" name="import_post_type" value="resources" class="regular-text" />';
-    echo '<p class="description">Use <code>post</code> unless your environment stores Resources as a custom post type.</p>';
+    echo '<p class="description">Use the CPT slug your site uses (e.g., <code>resources</code>). Use <code>post</code> if importing to Posts.</p>';
     echo '</td></tr>';
 
     echo '</tbody></table>';
@@ -188,12 +185,8 @@ class MRI_Content_Sync {
     echo '</form>';
 
     echo '<hr />';
-    echo '<h2>Required CSV Columns</h2>';
-    echo '<p><code>title, slug, abstract, h1, h2_sections</code></p>';
-
-    echo '<h2>ACF Columns Supported</h2>';
-    echo '<p><code>schema_jsonld_snippet</code> (Text Area) and <code>dynamic_resource_select</code> (Relationship, semicolon-separated Post IDs)</p>';
-
+    echo '<p><b>Required columns:</b> title, slug, abstract, h1, h2_sections</p>';
+    echo '<p><b>ACF supported:</b> schema_jsonld_snippet, dynamic_resource_select (IDs separated by semicolons)</p>';
     echo '</div>';
   }
 
@@ -226,14 +219,10 @@ class MRI_Content_Sync {
   }
 
   private static function handle_csv_import(): array {
-    if (empty($_FILES['mri_csv']['tmp_name'])) {
-      return ['error' => 'No file uploaded.'];
-    }
+    if (empty($_FILES['mri_csv']['tmp_name'])) return ['error' => 'No file uploaded.'];
 
     $uploaded = wp_handle_upload($_FILES['mri_csv'], ['test_form' => false]);
-    if (!empty($uploaded['error'])) {
-      return ['error' => $uploaded['error']];
-    }
+    if (!empty($uploaded['error'])) return ['error' => $uploaded['error']];
 
     $file = $uploaded['file'];
     $status = (!empty($_POST['import_status']) && $_POST['import_status'] === 'publish') ? 'publish' : 'draft';
@@ -243,22 +232,14 @@ class MRI_Content_Sync {
     if (!$fh) return ['error' => 'Could not read uploaded file.'];
 
     $header = fgetcsv($fh);
-    if (!$header) {
-      fclose($fh);
-      return ['error' => 'CSV header row missing or unreadable.'];
-    }
+    if (!$header) { fclose($fh); return ['error' => 'CSV header row missing or unreadable.']; }
 
     $map = [];
-    foreach ($header as $i => $col) {
-      $map[strtolower(trim((string)$col))] = $i;
-    }
+    foreach ($header as $i => $col) $map[strtolower(trim((string)$col))] = $i;
 
     $required = ['title','slug','abstract','h1','h2_sections'];
     foreach ($required as $col) {
-      if (!array_key_exists($col, $map)) {
-        fclose($fh);
-        return ['error' => "Missing required column: {$col}"];
-      }
+      if (!array_key_exists($col, $map)) { fclose($fh); return ['error' => "Missing required column: {$col}"]; }
     }
 
     $result = ['created'=>0,'updated'=>0,'failed'=>0,'items'=>[]];
@@ -275,11 +256,9 @@ class MRI_Content_Sync {
       $slug  = sanitize_title($get('slug'));
       if (!$title || !$slug) continue;
 
-      // Optional: if wp_post_id exists in CSV, update instead of create
       $wp_post_id = $get('wp_post_id');
       $wp_post_id = $wp_post_id ? intval($wp_post_id) : null;
 
-      // Build body_html if not provided
       $body_html = $get('body_html');
       if (!$body_html) {
         $body_html = self::build_html_from_outline(
@@ -295,49 +274,36 @@ class MRI_Content_Sync {
 
       $payload = [
         'recommended_title' => $title,
-        'suggested_url_slug' => $slug,
-        'post_type' => $post_type,
-        'post_status' => $status,
-        'body_html' => $body_html,
+        'suggested_url_slug'=> $slug,
+        'post_type'         => $post_type,
+        'post_status'       => $status,
+        'body_html'         => $body_html,
 
         // Yoast
-        'seo_title' => $get('seo_title') ?: $title,
+        'seo_title'       => $get('seo_title') ?: $title,
         'seo_description' => $get('seo_description') ?: wp_trim_words(wp_strip_all_tags($get('abstract')), 30, ''),
-        'focus_keyword' => $get('focus_keyphrase') ?: '',
+        'focus_keyword'   => $get('focus_keyphrase') ?: '',
 
-        // Taxonomies (semicolon or comma separated)
+        // Taxonomies
         'categories' => $get('categories') ?: $get('category'),
-        'tags' => $get('tags'),
+        'tags'       => $get('tags'),
 
         // Optional
-        'canonical_url' => $get('canonical_url'),
-        'schema_type' => $get('schema_type') ?: 'Article',
-        'internal_link_targets' => $get('internal_link_targets'),
+        'canonical_url'        => $get('canonical_url'),
+        'schema_type'          => $get('schema_type') ?: 'Article',
+        'internal_link_targets'=> $get('internal_link_targets'),
+        'cta_text'             => $get('cta_text'),
+        'cta_url'              => $get('cta_url'),
       ];
 
       $post_id = self::upsert_post($payload, $wp_post_id);
+      if (is_wp_error($post_id)) { $result['failed']++; continue; }
 
-      if (is_wp_error($post_id)) {
-        $result['failed']++;
-        continue;
-      }
+      // ACF setters (only here)
+      self::acf_set_schema_and_dynamic($post_id, $get('schema_jsonld_snippet'), $get('dynamic_resource_select'));
 
-      // ── ACF SETTERS (THE TWO YOU ASKED FOR) ──────────────────────────────
-      // Requires ACF Pro; uses field names you confirmed in screenshots.
-
-      // 1) Schema JSON-LD text area
-      $schema = $get('schema_jsonld_snippet');
-      if (!empty($schema) && function_exists('update_field')) {
-        update_field('schema_jsonld_snippet', $schema, $post_id);
-      }
-
-      // 2) Relationship: dynamic_resource_select (expects Post IDs)
-      $dyn = $get('dynamic_resource_select');
-      if (!empty($dyn) && function_exists('update_field')) {
-        $ids = array_map('intval', array_filter(array_map('trim', explode(';', $dyn))));
-        update_field('dynamic_resource_select', $ids, $post_id);
-      }
-      // ─────────────────────────────────────────────────────────────────────
+      // Sticky jump nav (scroll spy) from H2s
+      self::acf_set_scroll_spy_from_h2($post_id);
 
       $result['items'][] = [
         'post_id' => $post_id,
@@ -346,17 +312,100 @@ class MRI_Content_Sync {
         'url'     => get_permalink($post_id),
       ];
 
-      if ($wp_post_id) $result['updated']++;
-      else $result['created']++;
+      if ($wp_post_id) $result['updated']++; else $result['created']++;
     }
 
     fclose($fh);
     return $result;
   }
 
-  /**
-   * Outline → HTML builder (abstract, H1, H2/H3, related articles, CTA)
-   */
+  /* ──────────────────────────────────────────────────────────────────────────
+   * ACF HELPERS
+   * ────────────────────────────────────────────────────────────────────────── */
+
+  private static function acf_set_schema_and_dynamic(int $post_id, string $schema_jsonld, string $dynamic_ids) {
+    if (!function_exists('update_field')) return;
+
+    if (!empty($schema_jsonld)) {
+      update_field('schema_jsonld_snippet', $schema_jsonld, $post_id);
+    }
+
+    if (!empty($dynamic_ids)) {
+      $ids = array_map('intval', array_filter(array_map('trim', explode(';', $dynamic_ids))));
+      update_field('dynamic_resource_select', $ids, $post_id);
+    }
+  }
+
+  private static function acf_set_scroll_spy_from_h2(int $post_id) {
+    if (!function_exists('update_field')) return;
+
+    $post = get_post($post_id);
+    if (!$post) return;
+
+    $html = (string) $post->post_content;
+
+    // Extract H2 headings
+    preg_match_all('/<h2[^>]*>(.*?)<\/h2>/is', $html, $m);
+    $h2s = [];
+    foreach (($m[1] ?? []) as $raw) {
+      $t = trim(wp_strip_all_tags($raw));
+      if ($t) $h2s[] = $t;
+    }
+    if (empty($h2s)) return;
+
+    // Add id="" to H2 tags if missing
+    $i = 0;
+    $html = preg_replace_callback('/<h2([^>]*)>(.*?)<\/h2>/is', function($mm) use (&$i, $h2s) {
+      $attrs = $mm[1];
+      $inner = $mm[2];
+
+      if (preg_match('/\sid\s*=\s*["\'].*?["\']/i', $attrs)) {
+        $i++;
+        return $mm[0];
+      }
+
+      $label = $h2s[$i] ?? ('section-' . ($i+1));
+      $id = sanitize_title($label) ?: ('section-' . ($i+1));
+      $i++;
+
+      return '<h2 id="' . esc_attr($id) . '"' . $attrs . '>' . $inner . '</h2>';
+    }, $html);
+
+    // Save updated HTML back to post_content so anchors exist
+    wp_update_post([
+      'ID' => $post_id,
+      'post_content' => $html,
+    ]);
+
+    // Build ACF flexible content: sidebar_sticky_widgets → scroll_spy
+    // Layout: scroll_spy
+    // Subfields in your screenshot: title (text), links (repeater)
+    // NOTE: repeater subfields assumed: label + anchor (if yours differ, change below)
+    $links = [];
+    foreach ($h2s as $label) {
+      $id = sanitize_title($label) ?: '';
+      if (!$id) continue;
+      $links[] = [
+        'label'  => $label,        // <- if different, rename
+        'anchor' => '#' . $id,     // <- if different, rename
+      ];
+    }
+
+    $widgets_value = [
+      [
+        'acf_fc_layout' => 'scroll_spy',
+        'title' => 'On this page',
+        'links' => $links,
+      ]
+    ];
+
+    update_field('sidebar_sticky_widgets', $widgets_value, $post_id);
+  }
+
+  /* ──────────────────────────────────────────────────────────────────────────
+   * HTML BUILDER (fallback when body_html empty)
+   * ────────────────────────────────────────────────────────────────────────── */
+
   private static function build_html_from_outline(
     string $abstract,
     string $h1,
@@ -368,22 +417,17 @@ class MRI_Content_Sync {
   ): string {
     $html = '';
 
-    if ($abstract) {
-      $html .= '<p><strong>Abstract:</strong> ' . esc_html($abstract) . '</p>';
-    }
+    if ($abstract) $html .= '<p><strong>Abstract:</strong> ' . esc_html($abstract) . '</p>';
 
     // If your theme already renders the post title as H1, you can remove this line to avoid double-H1.
-    if ($h1) {
-      $html .= '<h1>' . esc_html($h1) . '</h1>';
-    }
+    if ($h1) $html .= '<h1>' . esc_html($h1) . '</h1>';
 
     if ($h2_sections) {
       $lines = preg_split("/\\r\\n|\\r|\\n/", $h2_sections);
       foreach ($lines as $line) {
         $line = trim((string)$line);
         if (!$line) continue;
-        $html .= '<h2>' . esc_html($line) . '</h2>';
-        $html .= '<p></p>';
+        $html .= '<h2>' . esc_html($line) . '</h2><p></p>';
       }
     }
 
@@ -392,20 +436,16 @@ class MRI_Content_Sync {
       foreach ($lines as $line) {
         $line = trim((string)$line);
         if (!$line) continue;
-        $html .= '<h3>' . esc_html($line) . '</h3>';
-        $html .= '<p></p>';
+        $html .= '<h3>' . esc_html($line) . '</h3><p></p>';
       }
     }
 
-    if ($cta_text && $cta_url) {
-      $html .= '<p><a href="' . esc_url($cta_url) . '">' . esc_html($cta_text) . '</a></p>';
-    }
+    if ($cta_text && $cta_url) $html .= '<p><a href="' . esc_url($cta_url) . '">' . esc_html($cta_text) . '</a></p>';
 
     if ($related_urls) {
       $html .= '<h2>Related Articles</h2><ul>';
       $urls = array_filter(array_map('trim', preg_split('/[;|,]/', $related_urls)));
       foreach ($urls as $u) {
-        if (!$u) continue;
         $html .= '<li><a href="' . esc_url($u) . '">' . esc_html($u) . '</a></li>';
       }
       $html .= '</ul>';
@@ -415,20 +455,20 @@ class MRI_Content_Sync {
   }
 
   /* ──────────────────────────────────────────────────────────────────────────
-   * EXISTING UPSERT + YOAST META (UNCHANGED)
+   * UPSERT + YOAST (clean)
    * ────────────────────────────────────────────────────────────────────────── */
 
   private static function upsert_post(array $p, $post_id = null) {
-    $title = $p['recommended_title'] ?? null;
-    $slug  = $p['suggested_url_slug'] ?? null;
-    $status = $p['post_status'] ?? 'draft';
+    $title   = $p['recommended_title'] ?? null;
+    $slug    = $p['suggested_url_slug'] ?? null;
+    $status  = $p['post_status'] ?? 'draft';
     $content = $p['body_html'] ?? $p['post_content'] ?? '';
 
     if (!$title || !$slug) return new \WP_Error('bad_request', 'recommended_title and suggested_url_slug required');
 
     $postarr = [
       'ID'           => $post_id ? intval($post_id) : 0,
-      'post_type'    => $p['post_type'] ?? 'resources',
+      'post_type'    => $p['post_type'] ?? 'post',
       'post_status'  => $status,
       'post_title'   => $title,
       'post_name'    => sanitize_title($slug),
@@ -437,59 +477,20 @@ class MRI_Content_Sync {
     ];
 
     $new_id = $post_id ? wp_update_post($postarr, true) : wp_insert_post($postarr, true);
-// Post already inserted/updated above and stored in $new_id
-if (is_wp_error($new_id)) return $new_id;
-
-
-if (function_exists('update_field')) {
-
-  // 1) Flexible content block (Basic Content) populated from $content
-  if (!empty($content)) {
-    $block = [
-      'acf_fc_layout' => 'basic_content',
-      'heading'       => $p['h1'] ?? $title,
-      'content'       => $content,
-    ];
-
-    // Optional CTA -> buttons repeater
-    if (!empty($p['cta_text']) && !empty($p['cta_url'])) {
-      $block['buttons'] = [[
-        'url'           => $p['cta_url'],
-        'text'          => $p['cta_text'],
-        'button_color'  => 'btn--primary',
-        'button_target' => 0,
-      ]];
-    }
-
-    update_field('flexible_content_blocks', [ $block ], $new_id);
-  }
-
-  // 2) Schema JSON-LD text area
-  if (!empty($p['schema_jsonld_snippet'])) {
-    update_field('schema_jsonld_snippet', $p['schema_jsonld_snippet'], $new_id);
-  }
-
-  // 3) Relationship field (expects array of Post IDs)
-  if (!empty($p['dynamic_resource_select'])) {
-    $ids = is_array($p['dynamic_resource_select'])
-      ? array_map('intval', $p['dynamic_resource_select'])
-      : array_map('intval', array_filter(array_map('trim', explode(';', (string)$p['dynamic_resource_select']))));
-
-    update_field('dynamic_resource_select', $ids, $new_id);
-  }
-}
+    if (is_wp_error($new_id)) return $new_id;
 
     if (!empty($p['categories'])) {
-      $cats = is_array($p['categories']) ? $p['categories'] : array_map('trim', explode(',', $p['categories']));
-      wp_set_post_terms($new_id, $cats, 'category', false);
+      $cats = is_array($p['categories']) ? $p['categories'] : array_filter(array_map('trim', preg_split('/[;|,]/', (string)$p['categories'])));
+      if (!empty($cats)) wp_set_post_terms($new_id, $cats, 'category', false);
     }
     if (!empty($p['tags'])) {
-      $tags = is_array($p['tags']) ? $p['tags'] : array_map('trim', explode(',', $p['tags']));
-      wp_set_post_terms($new_id, $tags, 'post_tag', false);
+      $tags = is_array($p['tags']) ? $p['tags'] : array_filter(array_map('trim', preg_split('/[;|,]/', (string)$p['tags'])));
+      if (!empty($tags)) wp_set_post_terms($new_id, $tags, 'post_tag', false);
     }
 
     self::set_yoast_meta($new_id, $p);
 
+    // Existing meta fields kept as-is
     update_post_meta($new_id, 'mri_hub', $p['hub'] ?? '');
     update_post_meta($new_id, 'mri_cluster', $p['cluster'] ?? '');
     update_post_meta($new_id, 'mri_pillar_or_cluster', $p['pillar_or_cluster'] ?? '');
@@ -502,7 +503,7 @@ if (function_exists('update_field')) {
     if (!empty($p['supporting_entities'])) {
       $entities = is_array($p['supporting_entities'])
         ? $p['supporting_entities']
-        : array_filter(array_map('trim', preg_split('/[;|,]/', $p['supporting_entities'])));
+        : array_filter(array_map('trim', preg_split('/[;|,]/', (string)$p['supporting_entities'])));
       update_post_meta($new_id, 'mri_supporting_entities', $entities);
     }
 
@@ -512,7 +513,7 @@ if (function_exists('update_field')) {
     if (!empty($p['internal_link_targets'])) {
       $targets = is_array($p['internal_link_targets'])
         ? $p['internal_link_targets']
-        : array_filter(array_map('trim', explode(';', $p['internal_link_targets'])));
+        : array_filter(array_map('trim', preg_split('/[;|,]/', (string)$p['internal_link_targets'])));
       update_post_meta($new_id, 'mri_internal_link_targets', $targets);
     }
 
