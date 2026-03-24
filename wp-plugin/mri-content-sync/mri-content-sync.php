@@ -294,16 +294,17 @@ class MRI_Content_Sync {
         'internal_link_targets'=> $get('internal_link_targets'),
         'cta_text'             => $get('cta_text'),
         'cta_url'              => $get('cta_url'),
+
+        // ACF passthrough
+        'schema_jsonld_snippet'   => $get('schema_jsonld_snippet'),
+        'dynamic_resource_select' => $get('dynamic_resource_select'),
+
+        // H1 (used for cleaning / content blocks heading)
+        'h1' => $get('h1'),
       ];
 
       $post_id = self::upsert_post($payload, $wp_post_id);
       if (is_wp_error($post_id)) { $result['failed']++; continue; }
-
-      // ACF setters (only here)
-      self::acf_set_schema_and_dynamic($post_id, $get('schema_jsonld_snippet'), $get('dynamic_resource_select'));
-
-      // Sticky jump nav (scroll spy) from H2s
-      self::acf_set_scroll_spy_from_h2($post_id);
 
       $result['items'][] = [
         'post_id' => $post_id,
@@ -320,23 +321,70 @@ class MRI_Content_Sync {
   }
 
   /* ──────────────────────────────────────────────────────────────────────────
+   * HTML CLEANUP HELPERS (fix double titles + layout oddities)
+   * ────────────────────────────────────────────────────────────────────────── */
+
+  private static function mri_strip_h1(string $html): string {
+    return preg_replace('/<h1\b[^>]*>.*?<\/h1>/is', '', $html) ?: $html;
+  }
+
+  private static function mri_cleanup_empty_paragraphs(string $html): string {
+    $html = preg_replace('/<p>\s*<\/p>/i', '', $html) ?: $html;
+    $html = preg_replace('/(\s*<br\s*\/?>\s*){3,}/i', '<br><br>', $html) ?: $html;
+    return $html;
+  }
+
+  private static function mri_wrap_tables(string $html): string {
+    if (stripos($html, '<table') === false) return $html;
+
+    $wrapped = preg_replace('/<table\b/i', '<div class="mri-table-wrap" style="overflow-x:auto;-webkit-overflow-scrolling:touch;"><table', $html);
+    $wrapped = preg_replace('/<\/table>/i', '</table></div>', $wrapped);
+
+    return $wrapped ?: $html;
+  }
+
+  /* ──────────────────────────────────────────────────────────────────────────
    * ACF HELPERS
    * ────────────────────────────────────────────────────────────────────────── */
 
-  private static function acf_set_schema_and_dynamic(int $post_id, string $schema_jsonld, string $dynamic_ids) {
+  private static function acf_set_schema_and_dynamic(int $post_id, array $p): void {
     if (!function_exists('update_field')) return;
 
-    if (!empty($schema_jsonld)) {
-      update_field('schema_jsonld_snippet', $schema_jsonld, $post_id);
+    if (!empty($p['schema_jsonld_snippet'])) {
+      update_field('schema_jsonld_snippet', (string)$p['schema_jsonld_snippet'], $post_id);
     }
 
-    if (!empty($dynamic_ids)) {
-      $ids = array_map('intval', array_filter(array_map('trim', explode(';', $dynamic_ids))));
+    if (!empty($p['dynamic_resource_select'])) {
+      $ids = is_array($p['dynamic_resource_select'])
+        ? array_map('intval', $p['dynamic_resource_select'])
+        : array_map('intval', array_filter(array_map('trim', explode(';', (string)$p['dynamic_resource_select']))));
       update_field('dynamic_resource_select', $ids, $post_id);
     }
   }
 
-  private static function acf_set_scroll_spy_from_h2(int $post_id) {
+  private static function acf_set_body_content_blocks(int $post_id, array $p, string $html): void {
+    if (!function_exists('update_field')) return;
+
+    // IMPORTANT: leave heading empty to avoid duplicating the hero/title
+    $block = [
+      'acf_fc_layout' => 'basic_content',
+      'heading'       => '',
+      'content'       => $html,
+    ];
+
+    if (!empty($p['cta_text']) && !empty($p['cta_url'])) {
+      $block['buttons'] = [[
+        'url'           => (string)$p['cta_url'],
+        'text'          => (string)$p['cta_text'],
+        'button_color'  => 'btn--primary',
+        'button_target' => 0,
+      ]];
+    }
+
+    update_field('flexible_content_blocks', [ $block ], $post_id);
+  }
+
+  private static function acf_set_scroll_spy_from_h2(int $post_id): void {
     if (!function_exists('update_field')) return;
 
     $post = get_post($post_id);
@@ -344,7 +392,6 @@ class MRI_Content_Sync {
 
     $html = (string) $post->post_content;
 
-    // Extract H2 headings
     preg_match_all('/<h2[^>]*>(.*?)<\/h2>/is', $html, $m);
     $h2s = [];
     foreach (($m[1] ?? []) as $raw) {
@@ -355,7 +402,7 @@ class MRI_Content_Sync {
 
     // Add id="" to H2 tags if missing
     $i = 0;
-    $html = preg_replace_callback('/<h2([^>]*)>(.*?)<\/h2>/is', function($mm) use (&$i, $h2s) {
+    $html2 = preg_replace_callback('/<h2([^>]*)>(.*?)<\/h2>/is', function($mm) use (&$i, $h2s) {
       $attrs = $mm[1];
       $inner = $mm[2];
 
@@ -371,23 +418,28 @@ class MRI_Content_Sync {
       return '<h2 id="' . esc_attr($id) . '"' . $attrs . '>' . $inner . '</h2>';
     }, $html);
 
-    // Save updated HTML back to post_content so anchors exist
-    wp_update_post([
-      'ID' => $post_id,
-      'post_content' => $html,
-    ]);
+    if ($html2 && $html2 !== $html) {
+      wp_update_post([
+        'ID' => $post_id,
+        'post_content' => $html2,
+      ]);
+      $html = $html2;
+    }
 
-    // Build ACF flexible content: sidebar_sticky_widgets → scroll_spy
-    // Layout: scroll_spy
-    // Subfields in your screenshot: title (text), links (repeater)
-    // NOTE: repeater subfields assumed: label + anchor (if yours differ, change below)
+    // Scroll Spy ACF structure:
+    // sidebar_sticky_widgets -> scroll_spy -> title, links(repeater)
+    // links repeater subfield: link (Link field)
     $links = [];
     foreach ($h2s as $label) {
       $id = sanitize_title($label) ?: '';
       if (!$id) continue;
+
       $links[] = [
-        'label'  => $label,        // <- if different, rename
-        'anchor' => '#' . $id,     // <- if different, rename
+        'link' => [
+          'title'  => $label,
+          'url'    => '#' . $id,
+          'target' => '',
+        ]
       ];
     }
 
@@ -418,8 +470,6 @@ class MRI_Content_Sync {
     $html = '';
 
     if ($abstract) $html .= '<p><strong>Abstract:</strong> ' . esc_html($abstract) . '</p>';
-
-    // If your theme already renders the post title as H1, you can remove this line to avoid double-H1.
     if ($h1) $html .= '<h1>' . esc_html($h1) . '</h1>';
 
     if ($h2_sections) {
@@ -445,9 +495,7 @@ class MRI_Content_Sync {
     if ($related_urls) {
       $html .= '<h2>Related Articles</h2><ul>';
       $urls = array_filter(array_map('trim', preg_split('/[;|,]/', $related_urls)));
-      foreach ($urls as $u) {
-        $html .= '<li><a href="' . esc_url($u) . '">' . esc_html($u) . '</a></li>';
-      }
+      foreach ($urls as $u) $html .= '<li><a href="' . esc_url($u) . '">' . esc_html($u) . '</a></li>';
       $html .= '</ul>';
     }
 
@@ -455,7 +503,7 @@ class MRI_Content_Sync {
   }
 
   /* ──────────────────────────────────────────────────────────────────────────
-   * UPSERT + YOAST (clean)
+   * UPSERT + YOAST
    * ────────────────────────────────────────────────────────────────────────── */
 
   private static function upsert_post(array $p, $post_id = null) {
@@ -479,6 +527,7 @@ class MRI_Content_Sync {
     $new_id = $post_id ? wp_update_post($postarr, true) : wp_insert_post($postarr, true);
     if (is_wp_error($new_id)) return $new_id;
 
+    // Taxonomies
     if (!empty($p['categories'])) {
       $cats = is_array($p['categories']) ? $p['categories'] : array_filter(array_map('trim', preg_split('/[;|,]/', (string)$p['categories'])));
       if (!empty($cats)) wp_set_post_terms($new_id, $cats, 'category', false);
@@ -488,7 +537,28 @@ class MRI_Content_Sync {
       if (!empty($tags)) wp_set_post_terms($new_id, $tags, 'post_tag', false);
     }
 
+    // Yoast
     self::set_yoast_meta($new_id, $p);
+
+    // ✅ Clean HTML to prevent duplicate H1 + spacing/table oddities
+    $content_clean = self::mri_strip_h1((string)$content);
+    $content_clean = self::mri_cleanup_empty_paragraphs($content_clean);
+    $content_clean = self::mri_wrap_tables($content_clean);
+
+    // ✅ Write body where the theme actually renders it (ACF content blocks)
+    self::acf_set_body_content_blocks((int)$new_id, $p, $content_clean);
+
+    // ACF: schema + dynamic relationship
+    self::acf_set_schema_and_dynamic((int)$new_id, $p);
+
+    // Sticky jump nav
+    // NOTE: jump nav should match the content that actually renders.
+    // We build anchors from post_content, so keep post_content aligned to cleaned HTML.
+    wp_update_post([
+      'ID' => $new_id,
+      'post_content' => $content_clean,
+    ]);
+    self::acf_set_scroll_spy_from_h2((int)$new_id);
 
     // Existing meta fields kept as-is
     update_post_meta($new_id, 'mri_hub', $p['hub'] ?? '');
